@@ -42,15 +42,6 @@
     <Filter Include="Blocks\Midi2\src">
       <UniqueIdentifier>{8DE652E5-7053-436E-AC95-44EB02E875F7}</UniqueIdentifier>
     </Filter>
-    <Filter Include="Blocks\Cinder-NDI">
-      <UniqueIdentifier>{03E346B0-9EE0-43C6-9940-B5B3AFE7016C}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="Blocks\Cinder-NDI\src">
-      <UniqueIdentifier>{58090431-4A49-4795-A753-F1BC815BAECF}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="Blocks\Cinder-NDI\include">
-      <UniqueIdentifier>{3E26D08E-5B96-4DCE-BCF2-1D270CD1A038}</UniqueIdentifier>
-    </Filter>
     <Filter Include="Blocks\Reymenta">
       <UniqueIdentifier>{A9D6BFEB-F419-43FB-8969-42D9BDB23877}</UniqueIdentifier>
     </Filter>
@@ -146,18 +137,6 @@
     <ClCompile Include="..\..\..\Cinder\blocks\Cinder-MIDI2\lib\RtMidi.cpp">
       <Filter>Blocks\Midi2\lib</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\..\Cinder\blocks\Cinder-NDI\src\CinderNDIReceiver.cpp">
-      <Filter>Blocks\Cinder-NDI\src</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\..\Cinder\blocks\Cinder-NDI\src\CinderNDISender.cpp">
-      <Filter>Blocks\Cinder-NDI\src</Filter>
-    </ClCompile>
-    <ClInclude Include="..\..\..\Cinder\blocks\Cinder-NDI\include\CinderNDIReceiver.h">
-      <Filter>Blocks\Cinder-NDI\include</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\..\Cinder\blocks\Cinder-NDI\include\CinderNDISender.h">
-      <Filter>Blocks\Cinder-NDI\include</Filter>
-    </ClInclude>
     <ClInclude Include="..\..\..\Cinder\blocks\Cinder-Reymenta\include\LiveParam.h">
       <Filter>Blocks\Reymenta\include</Filter>
     </ClInclude>
