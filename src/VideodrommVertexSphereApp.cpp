@@ -1,14 +1,7 @@
 #include "cinder/app/App.h"
 #include "cinder/app/RendererGl.h"
+#include "cinder/Rand.h"
 #include "cinder/gl/gl.h"
-#include "cinder/Vector.h"
-#include "cinder/gl/Fbo.h"
-#include "cinder/gl/Texture.h"
-#include "cinder/gl/GlslProg.h"
-#include "cinder/ImageIo.h"
-#include "cinder/Quaternion.h"
-#include "cinder/Utilities.h"
-#include "Resources.h"
 
 // audio
 #include "cinder/audio/Context.h"
@@ -21,28 +14,40 @@
 #include "cinder/audio/SampleRecorderNode.h"
 #include "cinder/audio/NodeEffects.h"
 #include "cinder/audio/MonitorNode.h"
-// UserInterface
-#include "CinderImGui.h"
-// Settings
-#include "VDSettings.h"
-// Session
-#include "VDSession.h"
-// Log
-#include "VDLog.h"
-// UI
-#include "VDUI.h"
-// Spout
-#include "CiSpoutIn.h"
-#include "CiSpoutOut.h"
 
+// Spout
+#include "CiSpoutOut.h"
 
 using namespace ci;
 using namespace ci::app;
 using namespace std;
-using namespace VideoDromm;
+/**
+Particle type holds information for rendering and simulation.
+Used to buffer initial simulation values.
+*/
+struct Particle
+{
+	vec3	pos;
+	vec3	ppos;
+	vec3	home;
+	ColorA  color;
+	float	damping;
+};
 
-#define IM_ARRAYSIZE(_ARR)			((int)(sizeof(_ARR)/sizeof(*_ARR)))
+// How many particles to create. (600k default)
+#if defined( CINDER_GL_ES ) // ES devices can't handle as many particles as the desktop
+const int NUM_PARTICLES = 600e2;
+#else
+const int NUM_PARTICLES = 600e3;
+#endif
 
+/**
+Simple particle simulation with Verlet integration and mouse interaction.
+A sphere of particles is deformed by mouse interaction.
+Simulation is run using transform feedback on the GPU.
+particleUpdate.vs defines the simulation update step.
+Designed to have the same behavior as ParticleSphereCPU.
+*/
 class VideodrommVertexSphereApp : public App {
 
 public:
@@ -53,56 +58,12 @@ public:
 	void mouseUp(MouseEvent event) override;
 	void keyDown(KeyEvent event) override;
 	void keyUp(KeyEvent event) override;
-	void fileDrop(FileDropEvent event) override;
+
 	void update() override;
 	void draw() override;
-	void cleanup() override;
-	void setUIVisibility(bool visible);
+
 private:
-	// Settings
-	VDSettingsRef					mVDSettings;
-	// Session
-	VDSessionRef					mVDSession;
-	// Log
-	VDLogRef							mVDLog;
-	// UI
-	VDUIRef								mVDUI;
-	// handle resizing for imgui
-	void									resizeWindow();
-	bool									mIsResizing;
-	// imgui
-	float									color[4];
-	float									backcolor[4];
-	int										playheadPositions[12];
-	int										speeds[12];
-
-	float									f = 0.0f;
-	char									buf[64];
-	unsigned int					i, j;
-
-	bool									mouseGlobal;
-
-	string								mError;
-	// fbo
-	bool									mIsShutDown;
-	Anim<float>						mRenderWindowTimer;
-	void									positionRenderWindow();
-	bool									mFadeInDelay;
-	SpoutIn								mSpoutIn;
 	SpoutOut 							mSpoutOut;
-	ci::SurfaceRef 				mSurface;
-	vec2 mMouse;
-	float mAngle;
-	float mRotationSpeed;
-	vec3 mAxis;
-	quat mQuat;
-	gl::GlslProgRef mShader;
-	gl::TextureRef		mTexture;
-	gl::TextureRef		sTexture;
-	//fbo
-	gl::FboRef				mFbo;
-
-	ivec2 mOutputResolution;
 
 	// audio
 	float							*mData;
@@ -113,34 +74,96 @@ private:
 	// number of frequency bands of our spectrum
 	static const int				kBands = 1024;
 	float							mAudioMultFactor;
-	bool							mRotate;
+
+	gl::GlslProgRef mRenderProg;
+	gl::GlslProgRef mUpdateProg;
+
+	// Descriptions of particle data layout.
+	gl::VaoRef		mAttributes[2];
+	// Buffers holding raw particle data on GPU.
+	gl::VboRef		mParticleBuffer[2];
+
+	// Current source and destination buffers for transform feedback.
+	// Source and destination are swapped each frame after update.
+	std::uint32_t	mSourceIndex = 0;
+	std::uint32_t	mDestinationIndex = 1;
+
+	// Mouse state suitable for passing as uniforms to update program
+	bool			mMouseDown = false;
+	float			mMouseForce = 0.0f;
+	vec3			mMousePos = vec3(0, 0, 0);
 };
 
 
 VideodrommVertexSphereApp::VideodrommVertexSphereApp()
 	: mSpoutOut("VertexSphere", app::getWindowSize())
 {
-	setWindowSize(640, 480);
-	setFrameRate(60.0f);
-	mRotationSpeed = 0.010f;
-	mAngle = 0.0f;
-	mAxis = vec3(0.0f, 1.0f, 0.0f);
-	mQuat = quat(mAngle, mAxis);
-	mRotate = true;
+	// Create initial particle layout.
+	vector<Particle> particles;
+	particles.assign(NUM_PARTICLES, Particle());
+	const float azimuth = 256.0f * M_PI / particles.size();
+	const float inclination = M_PI / particles.size();
+	const float radius = 180.0f;
+	vec3 center = vec3(getWindowCenter() + vec2(0.0f, 40.0f), 0.0f);
+	for (int i = 0; i < particles.size(); ++i)
+	{	// assign starting values to particles.
+		float x = radius * sin(inclination * i) * cos(azimuth * i);
+		float y = radius * cos(inclination * i);
+		float z = radius * sin(inclination * i) * sin(azimuth * i);
 
-	mShader = gl::GlslProg::create(loadAsset("mShader.vert"), loadAsset("mShader.frag"));
-	mTexture = gl::Texture::create(loadImage(loadAsset("0.jpg")));//ndf.jpg
-																			 /*mTexture.setWrap(GL_REPEAT, GL_REPEAT);
-																			 mTexture.setMinFilter(GL_NEAREST);
-																			 mTexture.setMagFilter(GL_NEAREST);*/
-	sTexture = gl::Texture::create(loadImage(loadAsset("0.jpg")));
+		auto &p = particles.at(i);
+		p.pos = center + vec3(x, y, z);
+		p.home = p.pos;
+		p.ppos = p.home + Rand::randVec3() * 10.0f; // random initial velocity
+		p.damping = Rand::randFloat(0.965f, 0.985f);
+		p.color = Color(CM_HSV, lmap<float>(i, 0.0f, particles.size(), 0.0f, 0.66f), 0.5f, 1.0f);
+	}
 
-	gl::enableDepthRead();
+	// Create particle buffers on GPU and copy data into the first buffer.
+	// Mark as static since we only write from the CPU once.
+	mParticleBuffer[mSourceIndex] = gl::Vbo::create(GL_ARRAY_BUFFER, particles.size() * sizeof(Particle), particles.data(), GL_STATIC_DRAW);
+	mParticleBuffer[mDestinationIndex] = gl::Vbo::create(GL_ARRAY_BUFFER, particles.size() * sizeof(Particle), nullptr, GL_STATIC_DRAW);
 
-	mOutputResolution = ivec2(640, 480);
+	for (int i = 0; i < 2; ++i)
+	{	// Describe the particle layout for OpenGL.
+		mAttributes[i] = gl::Vao::create();
+		gl::ScopedVao vao(mAttributes[i]);
 
-	mFbo = gl::Fbo::create(640, 480);
-	//mFbo->getTexture(0).setFlipped(true);
+		// Define attributes as offsets into the bound particle buffer
+		gl::ScopedBuffer buffer(mParticleBuffer[i]);
+		gl::enableVertexAttribArray(0);
+		gl::enableVertexAttribArray(1);
+		gl::enableVertexAttribArray(2);
+		gl::enableVertexAttribArray(3);
+		gl::enableVertexAttribArray(4);
+		gl::vertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Particle), (const GLvoid*)offsetof(Particle, pos));
+		gl::vertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(Particle), (const GLvoid*)offsetof(Particle, color));
+		gl::vertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(Particle), (const GLvoid*)offsetof(Particle, ppos));
+		gl::vertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof(Particle), (const GLvoid*)offsetof(Particle, home));
+		gl::vertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, sizeof(Particle), (const GLvoid*)offsetof(Particle, damping));
+	}
+
+	// Load our update program.
+	// Match up our attribute locations with the description we gave.
+
+#if defined( CINDER_GL_ES_3 )
+	mRenderProg = gl::GlslProg::create(gl::GlslProg::Format().vertex(loadAsset("draw_es3.vert"))
+		.fragment(loadAsset("draw_es3.frag")));
+	mUpdateProg = gl::GlslProg::create(gl::GlslProg::Format().vertex(loadAsset("particleUpdate_es3.vs"))
+		.fragment(loadAsset("no_op_es3.fs"))
+#else
+	mRenderProg = gl::getStockShader(gl::ShaderDef().color());
+	mUpdateProg = gl::GlslProg::create(gl::GlslProg::Format().vertex(loadAsset("particleUpdate.vs"))
+#endif
+		.feedbackFormat(GL_INTERLEAVED_ATTRIBS)
+		.feedbackVaryings({ "position", "pposition", "home", "color", "damping" })
+		.attribLocation("iPosition", 0)
+		.attribLocation("iColor", 1)
+		.attribLocation("iPPosition", 2)
+		.attribLocation("iHome", 3)
+		.attribLocation("iDamping", 4)
+	);
+
 	//audio
 	// linein
 	auto ctx = audio::Context::master();
@@ -163,48 +186,15 @@ VideodrommVertexSphereApp::VideodrommVertexSphereApp()
 	}
 
 }
-void VideodrommVertexSphereApp::positionRenderWindow() {
-	mVDSettings->mRenderPosXY = ivec2(mVDSettings->mRenderX, mVDSettings->mRenderY);//20141214 was 0
-	setWindowPos(mVDSettings->mRenderX, mVDSettings->mRenderY);
-	setWindowSize(mVDSettings->mRenderWidth, mVDSettings->mRenderHeight);
-}
-void VideodrommVertexSphereApp::setUIVisibility(bool visible)
-{
-	if (visible)
-	{
-		showCursor();
-	}
-	else
-	{
-		hideCursor();
-	}
-}
-void VideodrommVertexSphereApp::fileDrop(FileDropEvent event)
-{
-	string ext = "";
-	// use the last of the dropped files
-	fs::path mPath = event.getFile(event.getNumFiles() - 1);
-	string mFile = mPath.string();
-	if (mFile.find_last_of(".") != std::string::npos) ext = mFile.substr(mFile.find_last_of(".") + 1);
 
-	if (ext == "png" || ext == "jpg")
-	{
-		mTexture = gl::Texture::create(loadImage(mFile));
-
-	}
-}
 void VideodrommVertexSphereApp::update()
 {
-	mVDSession->setFloatUniformValueByIndex(mVDSettings->IFPS, getAverageFps());
-	mVDSession->update();
-
 
 	//audio
 	mMagSpectrum = mMonitorLineInSpectralNode->getMagSpectrum();
 	if (mMagSpectrum.empty())
 		return;
-	if (mRotate)
-	{
+	
 		maxVolume = 0.0;
 		size_t mDataSize = mMagSpectrum.size();
 		if (mDataSize > 0)
@@ -222,112 +212,91 @@ void VideodrommVertexSphereApp::update()
 				}
 			}
 		}
-		mAngle += mRotationSpeed;
+	
+	// Update particles on the GPU
+	gl::ScopedGlslProg prog(mUpdateProg);
+	gl::ScopedState rasterizer(GL_RASTERIZER_DISCARD, true);	// turn off fragment stage
+	mUpdateProg->uniform("uMouseForce", maxVolume * 10.0f);// mMouseForce);
+	mUpdateProg->uniform("uMousePos", mMousePos);
+
+	// Bind the source data (Attributes refer to specific buffers).
+	gl::ScopedVao source(mAttributes[mSourceIndex]);
+	// Bind destination as buffer base.
+	gl::bindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, mParticleBuffer[mDestinationIndex]);
+	gl::beginTransformFeedback(GL_POINTS);
+
+	// Draw source into destination, performing our vertex transformations.
+	gl::drawArrays(GL_POINTS, 0, NUM_PARTICLES);
+
+	gl::endTransformFeedback();
+
+	// Swap source and destination for next loop
+	std::swap(mSourceIndex, mDestinationIndex);
+
+	// Update mouse force.
+	if (mMouseDown) {
+		mMouseForce = 150.0f;
 	}
-	else
-	{
-		maxVolume = 0.0;
-	}
-	//mQuat.set(mAxis, mAngle);
-	getWindow()->setTitle("(" + toString(floor(getAverageFps())) + " fps) Sphere");
 }
-void VideodrommVertexSphereApp::cleanup()
-{
-	if (!mIsShutDown)
-	{
-		mIsShutDown = true;
-		CI_LOG_V("shutdown");
-		ui::disconnectWindow(getWindow());
-		
-		// save settings
-		mVDSettings->save();
-		mVDSession->save();
-		quit();
-	}
-}
+
 void VideodrommVertexSphereApp::mouseMove(MouseEvent event)
 {
 	
 }
 void VideodrommVertexSphereApp::mouseDown(MouseEvent event)
 {
-	mRotate = !mRotate;
+	mMouseDown = true;
+	mMouseForce = 500.0f;
+	mMousePos = vec3(event.getX(), event.getY(), 0.0f);
 }
 void VideodrommVertexSphereApp::mouseDrag(MouseEvent event)
 {
-		
+	mMousePos = vec3(event.getX(), event.getY(), 0.0f);
 }
 void VideodrommVertexSphereApp::mouseUp(MouseEvent event)
 {
-	
+	mMouseForce = 0.0f;
+	mMouseDown = false;
 }
 
 void VideodrommVertexSphereApp::keyDown(KeyEvent event)
 {
-	if (!mVDSession->handleKeyDown(event)) {
+	
 		switch (event.getCode()) {
 		case KeyEvent::KEY_ESCAPE:
 			// quit the application
 			quit();
 			break;
-		case KeyEvent::KEY_h:
-			// mouse cursor and ui visibility
-			mVDSettings->mCursorVisible = !mVDSettings->mCursorVisible;
-			setUIVisibility(mVDSettings->mCursorVisible);
-			break;
+	
 		}
-	}
+	
 }
 void VideodrommVertexSphereApp::keyUp(KeyEvent event)
 {
-	if (!mVDSession->handleKeyUp(event)) {
-	}
+	
 }
-void VideodrommVertexSphereApp::resizeWindow()
-{
-	mVDUI->resize();
-	mVDSession->resize();
-}
+
 
 void VideodrommVertexSphereApp::draw()
 {
 	gl::clear(Color::black());
-	unsigned int width, height;
 
-	mFbo->bindFramebuffer();
-	gl::clear();
-	//gl::setViewport(getWindowBounds());
 
-	//mTexture->enableAndBind();
-	mShader->bind();
-	/*if (maxVolume > 0)
-	{*/
-	mShader->uniform("normScale", maxVolume);
-	//}
-	//else
-	//{
-	//	mShader.uniform("normScale", (mMouse.x) / 5.0f);// (mMouse.x)
-	//}
-	mShader->uniform("colorMap", 0);
-	mShader->uniform("displacementMap", 0);
-	gl::pushModelView();
-	gl::translate(vec3(0.5f * 640, 0.5f * 480, 0));
-	gl::rotate(mQuat);
-	gl::drawSphere(vec3(0, 0, 0), 140, 500);
-	gl::popModelView();
-	//mShader->unbind();
-	mTexture->unbind();
+	gl::setMatricesWindowPersp(getWindowSize(), 60.0f, 1.0f, 10000.0f);
+	gl::enableDepthRead();
+	gl::enableDepthWrite();
 
-	mFbo->unbindFramebuffer();
-	sTexture = mFbo->getColorTexture();
-
-	gl::clear();
-	gl::draw(sTexture);
+	gl::ScopedGlslProg render(mRenderProg);
+	gl::ScopedVao vao(mAttributes[mSourceIndex]);
+	gl::context()->setDefaultShaderVars();
+	gl::drawArrays(GL_POINTS, 0, NUM_PARTICLES);
+	mSpoutOut.sendViewport();
 }
 
 void prepareSettings(App::Settings *settings)
 {
-	settings->setWindowSize(640, 480);
+	settings->setWindowSize(1280, 720);
+	settings->setMultiTouchEnabled(false);
 }
 
 CINDER_APP(VideodrommVertexSphereApp, RendererGl, prepareSettings)
